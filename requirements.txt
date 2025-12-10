@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+scipy          # for z-score, Grubbs' test etc.
+plotly         # nice interactive charts in Streamlit
+matplotlib     # optional, for some stats plots if you want
+fpdf2          # for generating PDF report
