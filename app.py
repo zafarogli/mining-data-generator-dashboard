@@ -8,20 +8,20 @@ from io import BytesIO
 import base64
 import pdfkit
 
-# 🔹 Page config — nicer title + wide layout
+# Page configuration: set title and wide layout
 st.set_page_config(
     page_title="Weyland-Yutani Mining Dashboard",
     layout="wide",
 )
 
-# 🔗 Your published DATA sheet CSV URL
+# Default Google Sheets CSV URL
 CSV_URL_DEFAULT = (
     "https://docs.google.com/spreadsheets/d/e/"
     "2PACX-1vRx7FuaguRcCHCwQOJyPv1oDCHM7u7oq5yDmI-iV0IoPOa2uroqOG8qZtD3ZvlB1CpqsOMw9Ri9mkS5/"
     "pub?gid=809861880&single=true&output=csv"
 )
 
-# ================== HELPER FUNCTIONS ==================
+# Helper functions
 
 
 def load_data(csv_url: str) -> pd.DataFrame:
@@ -48,7 +48,7 @@ def compute_stats(df: pd.DataFrame, mine_cols: list[str]) -> pd.DataFrame:
     """
     rows = []
 
-    # per-mine stats
+    # Per-mine statistics
     for col in mine_cols:
         s = df[col].dropna()
         rows.append(
@@ -61,7 +61,7 @@ def compute_stats(df: pd.DataFrame, mine_cols: list[str]) -> pd.DataFrame:
             }
         )
 
-    # total output stats
+    # Total output statistics
     total_series = df[mine_cols].sum(axis=1)
     rows.append(
         {
@@ -577,7 +577,7 @@ def html_to_pdf_bytes(html: str) -> bytes:
     return pdf_bytes
 
 
-# ================== STREAMLIT APP ==================
+# Streamlit app
 
 st.title("Weyland-Yutani Mining Ops Dashboard")
 st.caption(
@@ -630,17 +630,17 @@ anomaly_for_chart = st.sidebar.selectbox(
 if csv_url:
     df = load_data(csv_url)
 
-    # 🔴 IMPORTANT: exclude "Event Multiplier" from mines
+    # Exclude 'Event Multiplier' from mine columns
     mine_cols = [
         c
         for c in df.columns
         if c not in ["Date", "Day_idx", "Weekday", "Event Multiplier"]
     ]
 
-    # Stats
+    # Compute statistics
     stats_df = compute_stats(df, mine_cols)
 
-    # Long format for charts
+    # Convert dataframe to long format for charts
     df_long = df.melt(
         id_vars=["Date", "Day_idx", "Weekday"],
         value_vars=mine_cols,
@@ -648,7 +648,7 @@ if csv_url:
         value_name="Output",
     )
 
-    # Anomalies (used for tables + chart + combined list)
+    # Detect anomalies (for tables, chart, and combined list)
     anomalies_iqr = (
         detect_iqr_anomalies(df, mine_cols, k=k_iqr)
         if run_iqr or anomaly_for_chart == "IQR"
@@ -681,10 +681,10 @@ if csv_url:
         anomalies_grubbs,
     )
 
-    # ===== Layout: top columns =====
+    # Layout: top columns
     col_left, col_right = st.columns([2, 1])
 
-    # ===== Charts =====
+    # Charts
     with col_left:
         st.subheader("Mines output over time")
 
@@ -759,7 +759,7 @@ if csv_url:
 
         st.altair_chart(chart.interactive(), use_container_width=True)
 
-    # ===== Summary stats on the right =====
+    # Summary statistics (right column)
     with col_right:
         st.subheader("Summary statistics")
         st.dataframe(
@@ -775,14 +775,14 @@ if csv_url:
 
     st.markdown("---")
 
-    # ===== Combined anomaly list =====
+    # Combined anomaly list
     st.subheader("Combined anomaly list (all methods)")
     if combined_anomalies.empty:
         st.write("No anomalies detected by any method.")
     else:
         st.dataframe(combined_anomalies)
 
-    # ===== Individual anomaly tables =====
+    # Individual anomaly tables
     if run_iqr:
         st.subheader(f"IQR-based anomalies (k = {k_iqr})")
         st.write("Rule: value outside [Q1 - k·IQR, Q3 + k·IQR].")
@@ -817,7 +817,7 @@ if csv_url:
         else:
             st.dataframe(anomalies_grubbs)
 
-    # ===== PDF report =====
+    # PDF report
     st.markdown("---")
     st.subheader("Download report")
     if st.button("Generate PDF report"):
