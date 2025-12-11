@@ -8,20 +8,17 @@ from io import BytesIO
 import base64
 import pdfkit
 
-# Page configuration: set title and wide layout
 st.set_page_config(
     page_title="Weyland-Yutani Mining Dashboard",
     layout="wide",
 )
 
-# Default Google Sheets CSV URL
 url = (
     "https://docs.google.com/spreadsheets/d/e/"
     "2PACX-1vRx7FuaguRcCHCwQOJyPv1oDCHM7u7oq5yDmI-iV0IoPOa2uroqOG8qZtD3ZvlB1CpqsOMw9Ri9mkS5/"
     "pub?gid=809861880&single=true&output=csv"
 )
 
-# Helper functions
 
 
 def load_data(csv_url: str) -> pd.DataFrame:
