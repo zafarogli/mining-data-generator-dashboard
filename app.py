@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # Default Google Sheets CSV URL
-CSV_URL_DEFAULT = (
+url = (
     "https://docs.google.com/spreadsheets/d/e/"
     "2PACX-1vRx7FuaguRcCHCwQOJyPv1oDCHM7u7oq5yDmI-iV0IoPOa2uroqOG8qZtD3ZvlB1CpqsOMw9Ri9mkS5/"
     "pub?gid=809861880&single=true&output=csv"
@@ -587,7 +587,7 @@ st.caption(
 st.markdown("---")
 
 st.sidebar.title("Controls")
-csv_url = st.sidebar.text_input("Google Sheets CSV URL", CSV_URL_DEFAULT)
+csv_url = st.sidebar.text_input("Google Sheets CSV URL", url)
 
 # Anomaly tests to run
 st.sidebar.markdown("### Anomaly tests to run")
