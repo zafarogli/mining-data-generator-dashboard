@@ -4,4 +4,4 @@ numpy
 altair
 matplotlib
 scipy
-pdfkit
+reportlab

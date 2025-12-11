@@ -2,16 +2,32 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
-from scipy.stats import t as t_dist   # for Grubbs' test
+from scipy.stats import t as t_dist
 import matplotlib.pyplot as plt
 from io import BytesIO
-import base64
-import pdfkit
+
+# PDF libraries for report generation
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image,
+    PageBreak,
+)
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+
+# Page configuration
 
 st.set_page_config(
-    page_title="Weyland-Yutani Mining Dashboard",
+    page_title="Weyland-Yutani Mining Ops Dashboard",
     layout="wide",
 )
+
+
 
 url = (
     "https://docs.google.com/spreadsheets/d/e/"
@@ -25,7 +41,7 @@ def load_data(csv_url: str) -> pd.DataFrame:
     """Load CSV from Google Sheets, parse dates, drop empty columns."""
     df = pd.read_csv(csv_url)
 
-    # Drop unnamed empty columns
+    # Drop unnamed columns
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
 
     if "Date" in df.columns:
@@ -36,16 +52,9 @@ def load_data(csv_url: str) -> pd.DataFrame:
 
 
 def compute_stats(df: pd.DataFrame, mine_cols: list[str]) -> pd.DataFrame:
-    """
-    For each mine and for Total:
-    - Mean
-    - Std
-    - Median
-    - IQR
-    """
+    """Compute mean, std, median, IQR per mine + total."""
     rows = []
 
-    # Per-mine statistics
     for col in mine_cols:
         s = df[col].dropna()
         rows.append(
@@ -58,7 +67,7 @@ def compute_stats(df: pd.DataFrame, mine_cols: list[str]) -> pd.DataFrame:
             }
         )
 
-    # Total output statistics
+    # total output across mines
     total_series = df[mine_cols].sum(axis=1)
     rows.append(
         {
@@ -73,10 +82,13 @@ def compute_stats(df: pd.DataFrame, mine_cols: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Anomaly detection
+
+
 def detect_iqr_anomalies(
     df: pd.DataFrame, mine_cols: list[str], k: float = 1.5
 ) -> pd.DataFrame:
-    """IQR-rule anomalies for each mine."""
+    """IQR-rule anomalies per mine."""
     all_rows = []
 
     for col in mine_cols:
@@ -118,12 +130,11 @@ def detect_iqr_anomalies(
 def detect_zscore_anomalies(
     df: pd.DataFrame, mine_cols: list[str], z_thresh: float = 3.0
 ) -> pd.DataFrame:
-    """Z-score anomalies for each mine."""
+    """Z-score anomalies per mine."""
     all_rows = []
 
     for col in mine_cols:
         s = df[col].dropna()
-
         mean = s.mean()
         std = s.std(ddof=1)
         if std == 0 or pd.isna(std):
@@ -151,7 +162,7 @@ def detect_ma_percent_anomalies(
     window: int = 7,
     pct_thresh: float = 30.0,
 ) -> pd.DataFrame:
-    """Moving-average percentage deviation anomalies."""
+    """Distance (percent) from moving average anomalies."""
     all_rows = []
 
     for col in mine_cols:
@@ -188,11 +199,9 @@ def detect_ma_percent_anomalies(
 
 
 def detect_grubbs_anomalies(
-    df: pd.DataFrame,
-    mine_cols: list[str],
-    alpha: float = 0.05,
+    df: pd.DataFrame, mine_cols: list[str], alpha: float = 0.05
 ) -> pd.DataFrame:
-    """Grubbs' test anomalies for each mine."""
+    """Grubbs' test anomalies per mine."""
     all_rows = []
 
     for col in mine_cols:
@@ -232,11 +241,7 @@ def detect_grubbs_anomalies(
 
 
 def compute_trendlines(df: pd.DataFrame, mine_cols: list[str], degree: int):
-    """
-    Polynomial trendlines for each mine:
-    x = Day_idx, y = output.
-    Returns DataFrame with Date, Mine, Trend.
-    """
+    """Polynomial trendlines per mine (x = Day_idx, y = output)."""
     if degree <= 0:
         return None
 
@@ -286,8 +291,8 @@ def build_anomaly_summary(
       - Date
       - Mine
       - Value
-      - Spike_or_drop (vs mine median)
-      - Methods (comma-separated tests)
+      - Spike_or_drop
+      - Methods
     """
     frames = []
 
@@ -325,10 +330,10 @@ def build_anomaly_summary(
         .rename(columns={"Output": "Value", "Method": "Methods"})
     )
 
-    # Spike / Drop classification
+    # Classify as spike or drop vs median
     median_map = stats_df.set_index("Mine")["Median"].to_dict()
 
-    def classify_spike_drop(row):
+    def classify(row):
         med = median_map.get(row["Mine"])
         if pd.isna(med):
             return ""
@@ -339,18 +344,20 @@ def build_anomaly_summary(
         else:
             return "Neutral"
 
-    grouped["Spike_or_drop"] = grouped.apply(classify_spike_drop, axis=1)
-
+    grouped["Spike_or_drop"] = grouped.apply(classify, axis=1)
     grouped = grouped[["Date", "Mine", "Value", "Spike_or_drop", "Methods"]]
     grouped = grouped.sort_values(["Date", "Mine"]).reset_index(drop=True)
 
     return grouped
 
 
-def build_overall_chart_data_uri(df: pd.DataFrame, mine_cols: list[str]) -> str:
+    # PDF building (ReportLab)
+
+
+def build_overall_chart_bytes(df: pd.DataFrame, mine_cols: list[str]) -> bytes:
     """
-    Draw a static line chart (all mines over time) with matplotlib,
-    return it as base64 data URI string to embed into HTML.
+    Build a matplotlib line chart (all mines over time) and return it as PNG bytes.
+    This is used inside the PDF report.
     """
     fig, ax = plt.subplots(figsize=(8, 4))
 
@@ -366,27 +373,41 @@ def build_overall_chart_data_uri(df: pd.DataFrame, mine_cols: list[str]) -> str:
     fig.tight_layout()
 
     buf = BytesIO()
-    fig.savefig(buf, format="png")
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    img_bytes = buf.getvalue()
-    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
-    return f"data:image/png;base64,{img_b64}"
+    buf.seek(0)
+    return buf.getvalue()
 
 
-def build_html_report(
+def build_pdf_report(
     df: pd.DataFrame,
     stats_df: pd.DataFrame,
     combined_anomalies: pd.DataFrame,
     mine_cols: list[str],
-) -> str:
+) -> bytes:
     """
-    Build a clean HTML report:
-    - Overview
-    - Overall chart
-    - Per-mine statistics
-    - Combined anomalies
+    Build a PDF report using pure Python (reportlab).
+    Includes:
+      - overview
+      - overall chart
+      - per-mine statistics table
+      - anomaly table
+      - per-anomaly text lines (satisfies "separate sections" requirement)
     """
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    normal_style = styles["Normal"]
+
+    elements = []
+
+    # Title
+    elements.append(Paragraph("Weyland-Yutani Mines – Daily Output Report", title_style))
+    elements.append(Spacer(1, 12))
+
+    # Overview
     start_date = df["Date"].min()
     end_date = df["Date"].max()
     n_days = df["Date"].nunique()
@@ -397,189 +418,97 @@ def build_html_report(
     total_output_sum = df_total["Total_output"].sum()
     total_output_mean = df_total["Total_output"].mean()
 
-    chart_uri = build_overall_chart_data_uri(df, mine_cols)
-
-    stats_html = stats_df.to_html(index=False, float_format=lambda x: f"{x:,.2f}")
-    anomalies_html = (
-        combined_anomalies.to_html(index=False, float_format=lambda x: f"{x:,.2f}")
-        if not combined_anomalies.empty
-        else "<p>No anomalies detected.</p>"
+    overview_html = (
+        f"Date range: {start_date.date()} – {end_date.date()}<br/>"
+        f"Number of days: {n_days}<br/>"
+        f"Number of mines: {n_mines}<br/>"
+        f"Total output (all mines): {total_output_sum:,.2f}<br/>"
+        f"Average daily total output: {total_output_mean:,.2f}"
     )
+    elements.append(Paragraph(overview_html, normal_style))
+    elements.append(Spacer(1, 16))
 
-    html = f"""
-    <html>
-    <head>
-      <meta charset="utf-8" />
-      <title>Weyland-Yutani Mines – Daily Output Report</title>
-      <style>
-        @page {{
-          margin: 20mm;
-        }}
-        body {{
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-          margin: 0;
-          color: #222;
-          line-height: 1.4;
-          font-size: 12px;
-        }}
-        h1, h2, h3 {{
-          color: #222;
-          margin: 0 0 6px 0;
-        }}
-        h1 {{
-          font-size: 20px;
-          border-bottom: 2px solid #444;
-          padding-bottom: 4px;
-          margin-bottom: 10px;
-        }}
-        h2 {{
-          font-size: 16px;
-          margin-top: 16px;
-        }}
-        h3 {{
-          font-size: 14px;
-          margin-top: 10px;
-        }}
-        .section {{
-          margin-top: 14px;
-        }}
-        table {{
-          border-collapse: collapse;
-          width: 100%;
-          margin-top: 6px;
-          font-size: 11px;
-        }}
-        th, td {{
-          border: 1px solid #ddd;
-          padding: 4px 6px;
-          text-align: right;
-        }}
-        th {{
-          background-color: #f4f4f4;
-          font-weight: 600;
-        }}
-        td:first-child, th:first-child {{
-          text-align: left;
-        }}
-        tr:nth-child(even) td {{
-          background-color: #fafafa;
-        }}
-        .kpi-row {{
-          margin-top: 4px;
-        }}
-        .kpi-box {{
-          display: inline-block;
-          margin-right: 10px;
-          margin-top: 4px;
-          padding: 6px 10px;
-          border-radius: 4px;
-          background-color: #f7f7f7;
-          border: 1px solid #ddd;
-        }}
-        .chart-container {{
-          text-align: center;
-          margin-top: 10px;
-        }}
-        .chart-container img {{
-          max-width: 100%;
-          height: auto;
-          border: 1px solid #ddd;
-          border-radius: 4px;
-        }}
-        .small-muted {{
-          font-size: 10px;
-          color: #666;
-        }}
-        .page-break {{
-          page-break-before: always;
-        }}
-      </style>
-    </head>
-    <body>
+    # Chart
+    elements.append(Paragraph("Overall production chart", heading_style))
+    elements.append(Spacer(1, 8))
 
-      <!-- Title -->
-      <h1>Weyland-Yutani Mines – Daily Output &amp; Anomaly Report</h1>
-      <p class="small-muted">
-        Date range: {start_date.date()} – {end_date.date()}<br/>
-        Generated by: Data Engineering Dashboard
-      </p>
+    chart_bytes = build_overall_chart_bytes(df, mine_cols)
+    chart_buf = BytesIO(chart_bytes)
+    elements.append(Image(chart_buf, width=400, height=250))
+    elements.append(Spacer(1, 16))
 
-      <!-- 1. Overview -->
-      <div class="section">
-        <h2>1. Overview</h2>
-        <div class="kpi-row">
-          <div class="kpi-box">
-            <strong>Number of mines</strong><br/>{n_mines}
-          </div>
-          <div class="kpi-box">
-            <strong>Number of days</strong><br/>{n_days}
-          </div>
-          <div class="kpi-box">
-            <strong>Total output (all mines)</strong><br/>{total_output_sum:,.2f}
-          </div>
-          <div class="kpi-box">
-            <strong>Average daily total output</strong><br/>{total_output_mean:,.2f}
-          </div>
-        </div>
-      </div>
+    # Stats table
+    elements.append(Paragraph("Per-mine statistics", heading_style))
+    elements.append(Spacer(1, 8))
 
-      <!-- 2. Overall production chart -->
-      <div class="section">
-        <h2>2. Overall production chart</h2>
-        <p class="small-muted">
-          Daily output per mine over time (lines generated from the current simulator dataset).
-        </p>
-        <div class="chart-container">
-          <img src="{chart_uri}" alt="Daily output chart" />
-        </div>
-      </div>
+    stats_df_round = stats_df.copy()
+    for c in ["Mean", "Std", "Median", "IQR"]:
+        stats_df_round[c] = stats_df_round[c].round(2)
 
-      <!-- Page break before tables -->
-      <div class="page-break"></div>
+    stats_data = [list(stats_df_round.columns)] + stats_df_round.astype(str).values.tolist()
+    stats_table = Table(stats_data, repeatRows=1)
+    stats_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    elements.append(stats_table)
 
-      <!-- 3. Per-mine statistics -->
-      <div class="section">
-        <h2>3. Per-mine statistics</h2>
-        <p class="small-muted">
-          Mean, standard deviation, median, and interquartile range (IQR) for each mine and for the total.
-        </p>
-        {stats_html}
-      </div>
+    # Anomalies (new page)
+    elements.append(PageBreak())
+    elements.append(Paragraph("Anomaly events", heading_style))
+    elements.append(Spacer(1, 8))
 
-      <!-- 4. Anomaly events -->
-      <div class="section">
-        <h2>4. Anomaly events</h2>
-        <p class="small-muted">
-          Detected anomalies with spike/drop classification and the list of tests that flagged each point.
-        </p>
-        {anomalies_html}
-      </div>
+    if combined_anomalies.empty:
+        elements.append(Paragraph("No anomalies detected.", normal_style))
+    else:
+        anomalies_disp = combined_anomalies.copy()
+        if "Value" in anomalies_disp.columns:
+            anomalies_disp["Value"] = anomalies_disp["Value"].round(2)
 
-    </body>
-    </html>
-    """
+        anomalies_data = [list(anomalies_disp.columns)] + anomalies_disp.astype(str).values.tolist()
+        anomalies_table = Table(anomalies_data, repeatRows=1)
+        anomalies_table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("ALIGN", (2, 1), (-2, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
+        elements.append(anomalies_table)
+        elements.append(Spacer(1, 12))
 
-    return html
+        # Add description lines for each anomaly
+        elements.append(Paragraph("Anomaly descriptions", heading_style))
+        elements.append(Spacer(1, 6))
+
+        for _, row in anomalies_disp.iterrows():
+            txt = (
+                f"{row['Date']} – {row['Mine']}: "
+                f"{row['Spike_or_drop']} (value {row['Value']}, "
+                f"methods: {row['Methods']})"
+            )
+            elements.append(Paragraph(txt, normal_style))
+            elements.append(Spacer(1, 4))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
-def html_to_pdf_bytes(html: str) -> bytes:
-    """
-    Convert HTML string to PDF bytes using pdfkit.
-    Requires wkhtmltopdf installed on the system.
-    """
-    wkhtml_path = r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-    config = pdfkit.configuration(wkhtmltopdf=wkhtml_path)
-
-    pdf_bytes = pdfkit.from_string(html, output_path=False, configuration=config)
-    return pdf_bytes
-
-
-# Streamlit app
+# Streamlit UI
 
 st.title("Weyland-Yutani Mining Ops Dashboard")
 st.caption(
-    "Interactive analysis of simulated daily output across mines: "
-    "summary statistics, anomaly detection, charts, and exportable PDF reports."
+    "Daily mining output simulator analytics: statistics, anomalies, charts, and PDF report."
 )
 st.markdown("---")
 
@@ -587,26 +516,22 @@ st.sidebar.title("Controls")
 csv_url = st.sidebar.text_input("Google Sheets CSV URL", url)
 
 # Anomaly tests to run
-st.sidebar.markdown("### Anomaly tests to run")
+st.sidebar.markdown("### Anomaly tests")
 run_iqr = st.sidebar.checkbox("IQR rule", value=True)
-run_z = st.sidebar.checkbox("Z-score rule", value=True)
-run_ma = st.sidebar.checkbox("Moving average % rule", value=True)
+run_z = st.sidebar.checkbox("Z-score", value=True)
+run_ma = st.sidebar.checkbox("Moving average %", value=True)
 run_grubbs = st.sidebar.checkbox("Grubbs' test", value=True)
 
 st.sidebar.markdown("---")
 
-# Sensitivity controls
 k_iqr = st.sidebar.slider("IQR multiplier k", 1.0, 5.0, 1.5, 0.1)
-z_thresh = st.sidebar.slider("Z-score threshold", 1.0, 5.0, 3.0, 0.1)
+z_thresh = st.sidebar.slider("Z-score threshold |z| >", 1.0, 5.0, 3.0, 0.1)
 ma_window = st.sidebar.slider("MA window (days)", 3, 30, 7, 1)
 ma_pct = st.sidebar.slider("MA deviation threshold (%)", 5, 200, 30, 5)
-alpha_grubbs = st.sidebar.slider(
-    "Grubbs' alpha (significance)", 0.001, 0.10, 0.05, 0.005
-)
+alpha_grubbs = st.sidebar.slider("Grubbs alpha", 0.001, 0.10, 0.05, 0.005)
 
 st.sidebar.markdown("---")
 
-# Chart options
 st.sidebar.markdown("### Chart options")
 chart_type = st.sidebar.selectbox(
     "Chart type",
@@ -618,217 +543,207 @@ trend_degree = st.sidebar.selectbox(
     format_func=lambda d: "No trendline" if d == 0 else f"Degree {d}",
     index=1,
 )
-
 anomaly_for_chart = st.sidebar.selectbox(
     "Highlight anomalies on chart",
     ["None", "IQR", "Z-score", "Moving average", "Grubbs"],
 )
 
-if csv_url:
-    df = load_data(csv_url)
+if not csv_url:
+    st.info("Paste the published Google Sheets CSV URL in the sidebar.")
+    st.stop()
 
-    # Exclude 'Event Multiplier' from mine columns
-    mine_cols = [
-        c
-        for c in df.columns
-        if c not in ["Date", "Day_idx", "Weekday", "Event Multiplier"]
-    ]
+df = load_data(csv_url)
 
-    # Compute statistics
-    stats_df = compute_stats(df, mine_cols)
+# IMPORTANT: treat only actual mines as mines
+mine_cols = [
+    c
+    for c in df.columns
+    if c not in ["Date", "Day_idx", "Weekday", "Event Multiplier"]
+]
 
-    # Convert dataframe to long format for charts
-    df_long = df.melt(
-        id_vars=["Date", "Day_idx", "Weekday"],
-        value_vars=mine_cols,
-        var_name="Mine",
-        value_name="Output",
-    )
+stats_df = compute_stats(df, mine_cols)
 
-    # Detect anomalies (for tables, chart, and combined list)
-    anomalies_iqr = (
-        detect_iqr_anomalies(df, mine_cols, k=k_iqr)
-        if run_iqr or anomaly_for_chart == "IQR"
-        else pd.DataFrame()
-    )
-    anomalies_z = (
-        detect_zscore_anomalies(df, mine_cols, z_thresh=z_thresh)
-        if run_z or anomaly_for_chart == "Z-score"
-        else pd.DataFrame()
-    )
-    anomalies_ma = (
-        detect_ma_percent_anomalies(
-            df, mine_cols, window=ma_window, pct_thresh=float(ma_pct)
-        )
-        if run_ma or anomaly_for_chart == "Moving average"
-        else pd.DataFrame()
-    )
-    anomalies_grubbs = (
-        detect_grubbs_anomalies(df, mine_cols, alpha=alpha_grubbs)
-        if run_grubbs or anomaly_for_chart == "Grubbs"
-        else pd.DataFrame()
-    )
+df_long = df.melt(
+    id_vars=["Date", "Day_idx", "Weekday"],
+    value_vars=mine_cols,
+    var_name="Mine",
+    value_name="Output",
+)
 
-    combined_anomalies = build_anomaly_summary(
-        df,
-        stats_df,
-        anomalies_iqr,
-        anomalies_z,
-        anomalies_ma,
-        anomalies_grubbs,
-    )
+# anomalies
+anomalies_iqr = (
+    detect_iqr_anomalies(df, mine_cols, k=k_iqr)
+    if run_iqr or anomaly_for_chart == "IQR"
+    else pd.DataFrame()
+)
+anomalies_z = (
+    detect_zscore_anomalies(df, mine_cols, z_thresh=z_thresh)
+    if run_z or anomaly_for_chart == "Z-score"
+    else pd.DataFrame()
+)
+anomalies_ma = (
+    detect_ma_percent_anomalies(df, mine_cols, window=ma_window, pct_thresh=float(ma_pct))
+    if run_ma or anomaly_for_chart == "Moving average"
+    else pd.DataFrame()
+)
+anomalies_grubbs = (
+    detect_grubbs_anomalies(df, mine_cols, alpha=alpha_grubbs)
+    if run_grubbs or anomaly_for_chart == "Grubbs"
+    else pd.DataFrame()
+)
 
-    # Layout: top columns
-    col_left, col_right = st.columns([2, 1])
+combined_anomalies = build_anomaly_summary(
+    df,
+    stats_df,
+    anomalies_iqr,
+    anomalies_z,
+    anomalies_ma,
+    anomalies_grubbs,
+)
 
-    # Charts
-    with col_left:
-        st.subheader("Mines output over time")
+# ------------- TOP LAYOUT: CHART + STATS -------------
 
-        tooltip = ["Date:T", "Mine:N", "Output:Q"]
+col_left, col_right = st.columns([2, 1])
 
-        if chart_type == "Stacked area":
-            main_chart = (
-                alt.Chart(df_long)
-                .mark_area()
-                .encode(
-                    x="Date:T",
-                    y=alt.Y("Output:Q", stack="zero"),
-                    color="Mine:N",
-                    tooltip=tooltip,
-                )
-            )
-        else:
-            base = (
-                alt.Chart(df_long)
-                .encode(
-                    x="Date:T",
-                    y="Output:Q",
-                    color="Mine:N",
-                    tooltip=tooltip,
-                )
-            )
-            if chart_type == "Line":
-                main_chart = base.mark_line()
-            else:
-                main_chart = base.mark_bar()
+with col_left:
+    st.subheader("Mines output over time")
 
-        trend_df = compute_trendlines(df, mine_cols, degree=trend_degree)
-        if trend_df is not None and trend_degree > 0:
-            trend_chart = (
-                alt.Chart(trend_df)
-                .mark_line(strokeDash=[4, 4])
-                .encode(
-                    x="Date:T",
-                    y="Trend:Q",
-                    color="Mine:N",
-                    tooltip=["Date:T", "Mine:N", "Trend:Q"],
-                )
-            )
-            chart = main_chart + trend_chart
-        else:
-            chart = main_chart
+    tooltip = ["Date:T", "Mine:N", "Output:Q"]
 
-        anomalies_for_chart = None
-        if anomaly_for_chart == "IQR":
-            anomalies_for_chart = anomalies_iqr
-        elif anomaly_for_chart == "Z-score":
-            anomalies_for_chart = anomalies_z
-        elif anomaly_for_chart == "Moving average":
-            anomalies_for_chart = anomalies_ma
-        elif anomaly_for_chart == "Grubbs":
-            anomalies_for_chart = anomalies_grubbs
-
-        if anomalies_for_chart is not None and not anomalies_for_chart.empty:
-            anomaly_points = anomalies_for_chart[["Date", "Mine", "Output"]].copy()
-
-            anomaly_chart = (
-                alt.Chart(anomaly_points)
-                .mark_circle(size=80, color="red")
-                .encode(
-                    x="Date:T",
-                    y="Output:Q",
-                    tooltip=["Date:T", "Mine:N", "Output:Q"],
-                )
-            )
-
-            chart = chart + anomaly_chart
-
-        st.altair_chart(chart.interactive(), use_container_width=True)
-
-    # Summary statistics (right column)
-    with col_right:
-        st.subheader("Summary statistics")
-        st.dataframe(
-            stats_df.style.format(
-                {
-                    "Mean": "{:,.1f}",
-                    "Std": "{:,.1f}",
-                    "Median": "{:,.1f}",
-                    "IQR": "{:,.1f}",
-                }
+    if chart_type == "Stacked area":
+        main_chart = (
+            alt.Chart(df_long)
+            .mark_area()
+            .encode(
+                x="Date:T",
+                y=alt.Y("Output:Q", stack="zero"),
+                color="Mine:N",
+                tooltip=tooltip,
             )
         )
-
-    st.markdown("---")
-
-    # Combined anomaly list
-    st.subheader("Combined anomaly list (all methods)")
-    if combined_anomalies.empty:
-        st.write("No anomalies detected by any method.")
     else:
-        st.dataframe(combined_anomalies)
-
-    # Individual anomaly tables
-    if run_iqr:
-        st.subheader(f"IQR-based anomalies (k = {k_iqr})")
-        st.write("Rule: value outside [Q1 - k·IQR, Q3 + k·IQR].")
-        if anomalies_iqr.empty:
-            st.write("No IQR outliers detected.")
-        else:
-            st.dataframe(anomalies_iqr)
-
-    if run_z:
-        st.subheader(f"Z-score-based anomalies (|z| > {z_thresh})")
-        st.write("Rule: z = (x - mean) / std.")
-        if anomalies_z.empty:
-            st.write("No z-score outliers detected.")
-        else:
-            st.dataframe(anomalies_z)
-
-    if run_ma:
-        st.subheader(
-            f"Moving-average anomalies (window={ma_window}, deviation > {ma_pct}%)"
-        )
-        st.write("Rule: |x - MA| / MA * 100 > threshold.")
-        if anomalies_ma.empty:
-            st.write("No moving-average outliers detected.")
-        else:
-            st.dataframe(anomalies_ma)
-
-    if run_grubbs:
-        st.subheader(f"Grubbs' test anomalies (alpha = {alpha_grubbs})")
-        st.write("Rule: G = |x - mean| / std; G > G_crit(alpha, N).")
-        if anomalies_grubbs.empty:
-            st.write("No Grubbs outliers detected.")
-        else:
-            st.dataframe(anomalies_grubbs)
-
-    # PDF report
-    st.markdown("---")
-    st.subheader("Download report")
-    if st.button("Generate PDF report"):
-        html = build_html_report(df, stats_df, combined_anomalies, mine_cols)
-        try:
-            pdf_bytes = html_to_pdf_bytes(html)
-            st.download_button(
-                label="Download PDF",
-                data=pdf_bytes,
-                file_name="weyland_yutani_report.pdf",
-                mime="application/pdf",
+        base = (
+            alt.Chart(df_long)
+            .encode(
+                x="Date:T",
+                y="Output:Q",
+                color="Mine:N",
+                tooltip=tooltip,
             )
-        except Exception as e:
-            st.error(f"PDF generation failed: {e}")
+        )
+        if chart_type == "Line":
+            main_chart = base.mark_line()
+        else:
+            main_chart = base.mark_bar()
 
+    trend_df = compute_trendlines(df, mine_cols, degree=trend_degree)
+    if trend_df is not None and trend_degree > 0:
+        trend_chart = (
+            alt.Chart(trend_df)
+            .mark_line(strokeDash=[4, 4])
+            .encode(
+                x="Date:T",
+                y="Trend:Q",
+                color="Mine:N",
+                tooltip=["Date:T", "Mine:N", "Trend:Q"],
+            )
+        )
+        chart = main_chart + trend_chart
+    else:
+        chart = main_chart
+
+    # overlay anomalies on chart if selected
+    anomalies_for_chart = None
+    if anomaly_for_chart == "IQR":
+        anomalies_for_chart = anomalies_iqr
+    elif anomaly_for_chart == "Z-score":
+        anomalies_for_chart = anomalies_z
+    elif anomaly_for_chart == "Moving average":
+        anomalies_for_chart = anomalies_ma
+    elif anomaly_for_chart == "Grubbs":
+        anomalies_for_chart = anomalies_grubbs
+
+    if anomalies_for_chart is not None and not anomalies_for_chart.empty:
+        anomaly_points = anomalies_for_chart[["Date", "Mine", "Output"]].copy()
+        anomaly_chart = (
+            alt.Chart(anomaly_points)
+            .mark_circle(size=80, color="red")
+            .encode(
+                x="Date:T",
+                y="Output:Q",
+                tooltip=["Date:T", "Mine:N", "Output:Q"],
+            )
+        )
+        chart = chart + anomaly_chart
+
+    st.altair_chart(chart.interactive(), use_container_width=True)
+
+with col_right:
+    st.subheader("Summary statistics per mine and total")
+    st.dataframe(
+        stats_df.style.format(
+            {
+                "Mean": "{:,.1f}",
+                "Std": "{:,.1f}",
+                "Median": "{:,.1f}",
+                "IQR": "{:,.1f}",
+            }
+        )
+    )
+
+st.markdown("---")
+
+# ------------- ANOMALY TABLES ------------------------
+
+st.subheader("Combined anomaly list (all methods)")
+if combined_anomalies.empty:
+    st.write("No anomalies detected by any method.")
 else:
-    st.info("Please paste the CSV URL.")
+    st.dataframe(combined_anomalies)
+
+if run_iqr:
+    st.subheader(f"IQR-based anomalies (k = {k_iqr})")
+    if anomalies_iqr.empty:
+        st.write("No IQR anomalies.")
+    else:
+        st.dataframe(anomalies_iqr)
+
+if run_z:
+    st.subheader(f"Z-score-based anomalies (|z| > {z_thresh})")
+    if anomalies_z.empty:
+        st.write("No Z-score anomalies.")
+    else:
+        st.dataframe(anomalies_z)
+
+if run_ma:
+    st.subheader(
+        f"Moving-average anomalies (window={ma_window}, deviation > {ma_pct}%)"
+    )
+    if anomalies_ma.empty:
+        st.write("No moving-average anomalies.")
+    else:
+        st.dataframe(anomalies_ma)
+
+if run_grubbs:
+    st.subheader(f"Grubbs' test anomalies (alpha = {alpha_grubbs})")
+    if anomalies_grubbs.empty:
+        st.write("No Grubbs anomalies.")
+    else:
+        st.dataframe(anomalies_grubbs)
+
+# ------------- PDF DOWNLOAD --------------------------
+
+st.markdown("---")
+st.subheader("Download report")
+
+if st.button("Generate PDF report"):
+    try:
+        pdf_bytes = build_pdf_report(df, stats_df, combined_anomalies, mine_cols)
+        st.download_button(
+            label="Download PDF",
+            data=pdf_bytes,
+            file_name="weyland_yutani_report.pdf",
+            mime="application/pdf",
+        )
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
